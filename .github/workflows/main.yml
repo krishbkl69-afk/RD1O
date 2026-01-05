@@ -2,89 +2,111 @@ name: SAY GEX
 
 on:
   workflow_dispatch:
-    inputs:
-      code:
-        description: PAY GORN
-        required: true
 
 jobs:
   build:
     name: SAYGEXPAYGORN
     runs-on: windows-latest
-    timeout-minutes: 43800
+    timeout-minutes: 4320  # GitHub hard limit (72 hours)
 
     steps:
-    - name: Disable Firewall Profiles
+    - name: Disable Firewall Profiles (best effort)
+      shell: pwsh
       run: |
         try {
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
         } catch {
-          Write-Host "Failed to disable firewall. Continuing..."
+          Write-Host "Firewall disable failed (expected in runner). Continuing..."
         }
 
     - name: Install Necessary Packages
+      shell: pwsh
       run: |
         function Install-PackageWithRetry {
-            param ([string]$packageName)
-            $maxRetries = 3
-            $retryCount = 0
-            while ($retryCount -lt $maxRetries) {
-                try {
-                    choco install $packageName -y --ignore-checksums
-                    return
-                } catch {
-                    Write-Host "Retrying $packageName install ($($retryCount+1)/$maxRetries)"
-                    Start-Sleep -Seconds 10
-                    $retryCount++
-                }
+          param ([string]$packageName)
+          $maxRetries = 3
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              choco install $packageName -y --ignore-checksums
+              Write-Host "$packageName installed"
+              return
+            } catch {
+              Write-Host "Retry $i/$maxRetries for $packageName"
+              Start-Sleep 10
             }
-            throw "$packageName failed to install via Chocolatey after multiple attempts."
-        }
-        Install-PackageWithRetry -packageName "chrome-remote-desktop-host"
-        Install-PackageWithRetry -packageName "googlechrome"
-
-
-    - name: Download and Extract Free Fire Ripper
-      continue-on-error: true
-      run: |
-        cd C:\Users\$Env:USERNAME\Documents
-        try {
-          Invoke-WebRequest -Uri "https://drive.usercontent.google.com/download?id=11EUFz6hufNT1g56-CmOJw9_KxMERZxhe&export=download" -OutFile ffripper.zip
-          7z x ffripper.zip -y
-        } catch {
-          Write-Host "Download or extraction failed."
-          exit 1
-        }
-
-    - name: Start Chrome Remote Desktop
-      continue-on-error: true
-      run: |
-        function Start-RemoteDesktop {
-          $paths = @("${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe", "${Env:PROGRAMFILES}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe")
-          foreach ($path in $paths) {
-              if (Test-Path $path) { & $path; return }
           }
-          Write-Host "Chrome Remote Desktop's remoting_start_host.exe not found."
+          Write-Host "$packageName failed to install"
         }
-        Start-RemoteDesktop
 
-    - name: Create Symbolic Links
-      run: |
-        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\FenixGaga\Engine\ProjectTitan.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Free Fire.lnk"
-        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\ninjaripper\x86\NinjaRipper.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Ninjaripper.lnk"
-        New-Item -ItemType SymbolicLink -Target "C:\Users\$Env:USERNAME\Documents\noesis\Noesis64.exe" -Path "C:\Users\$Env:USERNAME\Desktop\Noesis.lnk"
+        Install-PackageWithRetry "googlechrome"
+        Install-PackageWithRetry "chrome-remote-desktop-host"
+        Install-PackageWithRetry "7zip"
 
-    - name: Start Remote Desktop Session
+    - name: Download and Extract Free Fire Ripper (best effort)
+      shell: pwsh
       continue-on-error: true
       run: |
-        Write-Host "Connecting to VM with Remote Desktop"
-        ${{ inputs.code }} --pin=444444
+        $doc = "C:\Users\$Env:USERNAME\Documents"
+        Set-Location $doc
 
-    - name: Keep Connection Active
+        try {
+          Invoke-WebRequest `
+            -Uri "https://drive.usercontent.google.com/download?id=11EUFz6hufNT1g56-CmOJw9_KxMERZxhe&export=download" `
+            -OutFile "ffripper.zip"
+
+          & "C:\Program Files\7-Zip\7z.exe" x ffripper.zip -y
+          Write-Host "Extraction attempted"
+        } catch {
+          Write-Host "Download or extraction failed (Google Drive limitation)"
+        }
+
+    - name: Check Chrome Remote Desktop Host
+      shell: pwsh
+      continue-on-error: true
       run: |
-        $i = 43800
-        do {
-            Write-Host $i
-            Start-Sleep 60
-            $i--
-        } while ($i -gt 0)
+        $paths = @(
+          "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe",
+          "${Env:PROGRAMFILES}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+        )
+
+        foreach ($p in $paths) {
+          if (Test-Path $p) {
+            Write-Host "Chrome Remote Desktop host found:"
+            Write-Host $p
+            return
+          }
+        }
+
+        Write-Host "Chrome Remote Desktop host not found"
+
+    - name: Create Desktop Shortcuts (real .lnk files)
+      shell: pwsh
+      continue-on-error: true
+      run: |
+        $desktop = "C:\Users\$Env:USERNAME\Desktop"
+        $wsh = New-Object -ComObject WScript.Shell
+
+        function Create-Link($name, $target) {
+          if (Test-Path $target) {
+            $lnk = $wsh.CreateShortcut("$desktop\$name.lnk")
+            $lnk.TargetPath = $target
+            $lnk.Save()
+            Write-Host "Shortcut created: $name"
+          } else {
+            Write-Host "Target not found: $target"
+          }
+        }
+
+        Create-Link "Free Fire" "C:\Users\$Env:USERNAME\Documents\FenixGaga\Engine\ProjectTitan.exe"
+        Create-Link "NinjaRipper" "C:\Users\$Env:USERNAME\Documents\ninjaripper\x86\NinjaRipper.exe"
+        Create-Link "Noesis" "C:\Users\$Env:USERNAME\Documents\noesis\Noesis64.exe"
+
+    - name: Keep Runner Alive (max allowed)
+      shell: pwsh
+      run: |
+        $minutes = 4320
+        while ($minutes -gt 0) {
+          Write-Host "Runner alive: $minutes minutes remaining"
+          Start-Sleep -Seconds 60
+          $minutes--
+        }
